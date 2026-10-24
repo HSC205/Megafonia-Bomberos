@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
+#include <WiFi.h>
+#include "secrets.h"
 
 constexpr unsigned long ANTIRREBOTE_MS = 30;
 constexpr unsigned long PULSACION_LARGA_MS = 5000;
@@ -81,8 +83,13 @@ const char* ultimoEvento = "Listo";
 void mostrarPantalla() {
   pantalla.clearBuffer();
   pantalla.setFont(u8g2_font_6x12_tr);
-  pantalla.drawStr(4, 12, "CONTADOR DOS BOTONES");
-
+ if (WiFi.status() == WL_CONNECTED) {
+  pantalla.setCursor(4, 12);
+  pantalla.print("IP:");
+  pantalla.print(WiFi.localIP());
+} else {
+  pantalla.drawStr(4, 12, "WiFi sin conexion");
+}
   pantalla.setCursor(4, 28);
   pantalla.print("Cuenta: ");
   pantalla.print(contador);
@@ -99,6 +106,9 @@ void mostrarPantalla() {
 
 void setup() {
   Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+WiFi.setAutoReconnect(true);
+WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   botonMas.iniciar();
   botonMenos.iniciar();
 
