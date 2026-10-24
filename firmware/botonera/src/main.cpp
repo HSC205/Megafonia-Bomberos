@@ -2,37 +2,105 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 
-constexpr uint8_t PIN_BOTON = 27;
+constexpr unsigned long ANTIRREBOTE_MS = 30;
+constexpr unsigned long PULSACION_LARGA_MS = 5000;
+
+enum Evento { NINGUNO, CORTA, LARGA };
+
+class Boton {
+ public:
+  Boton(uint8_t pin, bool permiteLarga)
+      : pin_(pin), permiteLarga_(permiteLarga) {}
+
+  void iniciar() {
+    pinMode(pin_, INPUT_PULLUP);
+  }
+
+  Evento actualizar(unsigned long ahora) {
+    bool lectura = digitalRead(pin_);
+
+    if (lectura != anterior_) {
+      anterior_ = lectura;
+      cambio_ = ahora;
+    }
+
+    if (ahora - cambio_ >= ANTIRREBOTE_MS &&
+        lectura != estable_) {
+      estable_ = lectura;
+
+      if (estable_ == LOW) {
+        inicio_ = cambio_;
+        largaEmitida_ = false;
+      } else {
+        if (!largaEmitida_) {
+          if (permiteLarga_ &&
+              cambio_ - inicio_ >= PULSACION_LARGA_MS) {
+            largaEmitida_ = true;
+            return LARGA;
+          }
+          return CORTA;
+        }
+      }
+    }
+
+    if (permiteLarga_ && estable_ == LOW && lectura == LOW &&
+        !largaEmitida_ &&
+        ahora - inicio_ >= PULSACION_LARGA_MS) {
+      largaEmitida_ = true;
+      return LARGA;
+    }
+
+    return NINGUNO;
+  }
+
+  bool pulsado() const {
+    return estable_ == LOW;
+  }
+
+ private:
+  uint8_t pin_;
+  bool permiteLarga_;
+  bool anterior_ = HIGH;
+  bool estable_ = HIGH;
+  bool largaEmitida_ = false;
+  unsigned long cambio_ = 0;
+  unsigned long inicio_ = 0;
+};
+
+Boton botonMas(27, true);
+Boton botonMenos(26, false);
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C pantalla(
     U8G2_R0, U8X8_PIN_NONE, 22, 21
 );
 
-bool lecturaAnterior = HIGH;
-bool estadoEstable = HIGH;
-unsigned long ultimoCambio = 0;
-unsigned int pulsaciones = 0;
+unsigned int contador = 0;
+unsigned long ultimoDibujo = 0;
+const char* ultimoEvento = "Listo";
 
 void mostrarPantalla() {
   pantalla.clearBuffer();
   pantalla.setFont(u8g2_font_6x12_tr);
-  pantalla.drawStr(10, 14, "PRUEBA DE PULSADOR");
+  pantalla.drawStr(4, 12, "CONTADOR DOS BOTONES");
 
-  pantalla.setCursor(10, 34);
-  pantalla.print("Pulsaciones: ");
-  pantalla.print(pulsaciones);
+  pantalla.setCursor(4, 28);
+  pantalla.print("Cuenta: ");
+  pantalla.print(contador);
 
-  pantalla.drawStr(
-      10, 54,
-      estadoEstable == LOW ? "PULSADO" : "SUELTO"
-  );
+  pantalla.setCursor(4, 44);
+  pantalla.print("+");
+  pantalla.print(botonMas.pulsado() ? ":ON  " : ":OFF ");
+  pantalla.print("-");
+  pantalla.print(botonMenos.pulsado() ? ":ON" : ":OFF");
 
+  pantalla.drawStr(4, 60, ultimoEvento);
   pantalla.sendBuffer();
 }
 
 void setup() {
   Serial.begin(115200);
-  pinMode(PIN_BOTON, INPUT_PULLUP);
+  botonMas.iniciar();
+  botonMenos.iniciar();
 
   pantalla.setI2CAddress(0x3C * 2);
   pantalla.begin();
@@ -40,22 +108,30 @@ void setup() {
 }
 
 void loop() {
-  const unsigned long ahora = millis();
-  const bool lectura = digitalRead(PIN_BOTON);
+  unsigned long ahora = millis();
+  Evento mas = botonMas.actualizar(ahora);
+  Evento menos = botonMenos.actualizar(ahora);
 
-  if (lectura != lecturaAnterior) {
-    ultimoCambio = ahora;
-    lecturaAnterior = lectura;
-  }
-
-  if (ahora - ultimoCambio >= 30 && lectura != estadoEstable) {
-    estadoEstable = lectura;
-
-    if (estadoEstable == LOW) {
-      pulsaciones++;
-      Serial.printf("Pulsacion: %u\n", pulsaciones);
+  if (mas == LARGA) {
+    contador = 0;
+    ultimoEvento = "Reinicio por 5 s";
+    Serial.println("Pulsacion larga: contador a cero");
+  } else {
+    if (mas == CORTA) {
+      if (contador < 9999) contador++;
+      ultimoEvento = "Corta +: sumar";
+      Serial.printf("Sumar: %u\n", contador);
     }
 
+    if (menos == CORTA) {
+      if (contador > 0) contador--;
+      ultimoEvento = "Corta -: restar";
+      Serial.printf("Restar: %u\n", contador);
+    }
+  }
+
+  if (ahora - ultimoDibujo >= 100) {
+    ultimoDibujo = ahora;
     mostrarPantalla();
   }
 }
