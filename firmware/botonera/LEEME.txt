@@ -1,0 +1,110 @@
+MEGAFONIA BOTONERA Y RECEPTOR PC - VERSION 0.3.0
+
+INSTALACION
+1. Detener el receptor anterior con Ctrl+C en su terminal.
+2. Sustituir TODO src/main.cpp por el main.cpp del paquete.
+3. Sustituir TODO receptor_pc.py, junto a platformio.ini, por el del paquete.
+   Actualizar ambos archivos: el protocolo incorpora acciones y repeticiones.
+4. Conservar platformio.ini, include/secrets.h y .gitignore.
+   No hay nuevas bibliotecas externas que instalar. Preferences viene con ESP32.
+5. Guardar e iniciar receptor_pc.py con el comando habitual.
+6. Cargar el ESP32 con PlatformIO: Upload y esperar SUCCESS.
+
+INICIAR EL RECEPTOR EN POWERSHELL
+& "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" "D:\04 Proyectos\10 Megafonia Parque\Megafonia-Bomberos\firmware\botonera\receptor_pc.py"
+
+Debe aparecer: Receptor 0.3.0 preparado: menu, repeticiones y secuencia de 8 avisos
+
+USO NORMAL
+- Pantalla en espera: MEGAFONIA, WiFi OK y cobertura con un punto animado.
+- Una pulsacion corta envia el aviso AL SOLTAR el boton.
+- El nombre permanece en la OLED hasta que el PC indica el final de TODAS
+  las repeticiones de ese aviso. No se muestra el texto PC: FINALIZADO.
+- Otro boton, o de nuevo el mismo, interrumpe lo anterior e inicia el aviso
+  seleccionado con todas sus repeticiones. No se acumula una lista de avisos.
+- El envio trabaja en segundo plano. Si una peticion de red esta en curso,
+  el nuevo aviso sale al finalizar esa peticion; la red puede introducir demora.
+- Falta de confirmacion: nombre del aviso y SIN CONFIRMAR parpadeando cuatro
+  segundos, alternando 500 ms visible/oculto. Otro boton se atiende enseguida.
+- SIN CONFIRMAR indica incertidumbre: el PC podria haber recibido la orden y
+  haberse perdido la respuesta. No se repite automaticamente una orden fallida.
+- Las confirmaciones y finales atrasados no borran el aviso nuevo.
+
+MENU SECRETO
+Entrar: mantener el boton 1 durante cinco segundos y soltar. No envia I. Urbano.
+El acceso no se anuncia en la pantalla habitual.
+
+Dentro del menu:
+7 = opcion anterior / disminuir valor.
+8 = opcion siguiente / aumentar valor.
+1 = aceptar / guardar.
+2 = volver; desde el menu principal sale a espera.
+Los botones del menu no envian sus avisos habituales.
+
+OPCIONES
+Reproducir todos
+  Reproduce 1, luego 2, hasta 8. Completa todas las repeticiones de cada aviso
+  antes del siguiente. Muestra Prueba n/8, nombre y Repeticion x/y.
+  Al terminar vuelve al menu. El boton 2 solicita detener la prueba y volver.
+  Solo se considera detenida cuando hay confirmacion. Si falta, SIN CONFIRMAR
+  parpadea cuatro segundos; la reproduccion podria continuar en el receptor.
+Repeticiones
+  Valor inicial 2; minimo 2, maximo 10. 7 disminuye, 8 aumenta.
+  1 guarda en memoria del ESP32 y se conserva al apagar; 2 descarta el cambio.
+  Una escritura fallida muestra ERROR AL GUARDAR y mantiene el valor previo.
+Estado del sistema
+  Wi-Fi, intensidad de senal, IP y si hubo antes un acuse valido del PC.
+  Ult. acuse PC: OK es un dato historico, no una comprobacion de disponibilidad
+  en tiempo real. Central, DFPlayer y microSD siguen pendientes en esta etapa.
+Version
+  Version del firmware 0.3.0 y version compatible del receptor PC.
+Salir
+  Regresa a la pantalla normal. Tambien se puede usar 2 desde el menu principal.
+
+SIMULACION
+El PC simula DOS SEGUNDOS POR REPRODUCCION. Con 2 repeticiones, cada aviso
+dura aproximadamente 4 segundos. Reproducir los ocho con el ajuste inicial
+tarda 32 segundos. Tres repeticiones: 6 segundos por aviso, 48 segundos todos.
+No se reproduce audio real. Mas adelante, la central usara el fin real de audio
+del DFPlayer y mantendra el mismo comportamiento de pantalla y repeticiones.
+El fin se consulta cada 150 ms; la OLED puede tardar unas decimas mas en volver.
+Las simulaciones avanzan por un unico reloj; un temporizador antiguo no puede
+terminar una reproduccion nueva. Los IDs detectan ordenes antiguas y duplicadas.
+
+PINES - NUMEROS GPIO, NO POSICIONES FISICAS DE PATILLA
+1 I. Urbano          GPIO 27
+2 I. Industrial      GPIO 26
+3 I. Vehiculo        GPIO 25
+4 I. Contenedor      GPIO 33
+5 Accidente Trafico  GPIO 32
+6 Rescate            GPIO 18
+7 Servicio Tecnico   GPIO 19
+8 Escape de Gas      GPIO 23
+Cada pulsador normalmente abierto une su GPIO a GND. Se usa INPUT_PULLUP.
+Los pulsadores aun no montados se pueden dejar sin conectar.
+OLED: GND -> GND; VCC -> 3V3; SDA -> GPIO 21; SCL -> GPIO 22.
+Cambiar el cableado con el USB desconectado. Mantener la antena conectada.
+
+CON LOS DOS PULSADORES ACTUALES
+Se puede enviar 1 y 2, entrar al menu, aceptar Reproducir todos (seleccionado
+al entrar) y cancelar con 2. Para desplazarse a las demas opciones hacen falta
+los pulsadores 7 y 8. No se han cambiado los controles para esta prueba parcial.
+
+RED Y ARCHIVOS
+PC: 192.168.68.111, puerto 8080. Editar BASE_PC si cambia la IP del ordenador.
+Navegador: http://192.168.68.111:8080/ muestra JSON; recargar para actualizar.
+El historial del receptor es temporal y se pierde al cerrar Python.
+El paquete no contiene tus credenciales. secrets.h sigue fuera de Git.
+
+VERIFICACIONES
+API ejecutada con reloj controlado: duracion de repeticiones, secuencia 1 a 8,
+cancelacion, sustitucion, duplicados, mensajes antiguos y validacion de limites.
+Codigo C++ completo comprobado en ordenador con adaptadores simulados: sintaxis,
+navegacion, guardar/cancelar edicion, lectura tras reinicio, fallo de escritura,
+limites de 2 a 10, avance de la prueba, cancelacion, respuestas viejas y error.
+Falta compilar con tu PlatformIO y probar en la placa real; no se ha realizado
+aqui una compilacion para el microcontrolador ni una prueba fisica de NVS.
+
+DOCUMENTACION
+Las tablas de botones y OLED se incorporaran en la proxima actualizacion del
+Word junto con el resultado real de esta version. Maquetado final pendiente.
