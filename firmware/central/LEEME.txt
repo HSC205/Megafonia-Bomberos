@@ -1,0 +1,30 @@
+CENTRAL MEGAFONIA 0.1.0 - ESP32-S3 N16R8
+
+Audio simulado, sin DFPlayer ni tonos reales. Cada repeticion dura 2 segundos.
+Compatible con botonera 0.3.0: AVISO, TODOS, PARAR y consulta de estado.
+Un aviso nuevo sustituye al anterior. Repeticiones de 2 a 10.
+
+INSTALACION
+1. Copiar platformio.ini a firmware/central/platformio.ini.
+2. Copiar src/main.cpp a firmware/central/src/main.cpp.
+3. Copiar el secrets.h de la botonera a firmware/central/include/secrets.h.
+   Debe definir WIFI_SSID y WIFI_PASSWORD. No incluir credenciales en Git.
+   Alternativa: duplicar include/secrets.example.h como secrets.h y rellenarlo.
+4. Anadir a tu .gitignore las lineas de este .gitignore, conservando las existentes.
+5. Guardar, compilar y cargar por el puerto COM de la placa.
+6. Abrir monitor serie a 115200 y, si no aparece el inicio, pulsar RESET/EN.
+7. Abrir en un navegador la URL que muestra: http://IP_CENTRAL:8080/.
+8. Para pasar la botonera del PC a la central: cambiar SOLO el valor de BASE_PC
+   en main.cpp de la botonera por http://IP_CENTRAL:8080 y volver a cargarla.
+   El nombre BASE_PC se mantiene para no cambiar mas codigo.
+   La IP se obtiene por DHCP; conviene reservarla en el router posteriormente.
+
+La web devuelve JSON; actualizar la pagina para ver cambios.
+No se han conectado ni validado DFPlayer, microSD o salida de audio en esta etapa.
+Historial en RAM: 64 eventos y 32 sesiones. Se pierde al reiniciar.
+Al reiniciar central durante un aviso, no lo reanuda automaticamente.
+Este receptor de pruebas no implementa autenticacion; no publicar el puerto en Internet.
+
+VALIDACION
+Preparado contra el protocolo del receptor_pc.py 0.3.0.
+La compilacion y la prueba fisica en ESP32 se realizan en tu PlatformIO.

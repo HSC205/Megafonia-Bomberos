@@ -10,7 +10,7 @@
 #include <freertos/task.h>
 #include "secrets.h"
 
-constexpr char BASE_PC[] = "http://192.168.68.111:8080";
+constexpr char BASE_PC[] = "http://192.168.68.114:8080";
 constexpr uint8_t PINES[] = {27, 26, 25, 33, 32, 18, 19, 23};
 constexpr uint32_t ANTIRREBOTE_MS = 30;
 constexpr uint32_t PULSACION_LARGA_MS = 5000;
@@ -435,3 +435,4 @@ void loop() {
   }
   delay(1);
 }
+
