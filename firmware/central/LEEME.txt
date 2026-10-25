@@ -1,30 +1,29 @@
-CENTRAL MEGAFONIA 0.1.0 - ESP32-S3 N16R8
+CENTRAL MEGAFONIA 0.2.1 - AUDIO REAL VALIDADO
 
-Audio simulado, sin DFPlayer ni tonos reales. Cada repeticion dura 2 segundos.
-Compatible con botonera 0.3.0: AVISO, TODOS, PARAR y consulta de estado.
-Un aviso nuevo sustituye al anterior. Repeticiones de 2 a 10.
+Proyecto: firmware/central. Abrir la carpeta que contiene platformio.ini.
+Conservar include/secrets.h privado con WIFI_SSID y WIFI_PASSWORD.
+Instalar juntos platformio.ini, src/main.cpp y src/SecuenciaAudio.h.
+Compilar y cargar con PlatformIO por el conector COM. Monitor serie: 115200.
 
-INSTALACION
-1. Copiar platformio.ini a firmware/central/platformio.ini.
-2. Copiar src/main.cpp a firmware/central/src/main.cpp.
-3. Copiar el secrets.h de la botonera a firmware/central/include/secrets.h.
-   Debe definir WIFI_SSID y WIFI_PASSWORD. No incluir credenciales en Git.
-   Alternativa: duplicar include/secrets.example.h como secrets.h y rellenarlo.
-4. Anadir a tu .gitignore las lineas de este .gitignore, conservando las existentes.
-5. Guardar, compilar y cargar por el puerto COM de la placa.
-6. Abrir monitor serie a 115200 y, si no aparece el inicio, pulsar RESET/EN.
-7. Abrir en un navegador la URL que muestra: http://IP_CENTRAL:8080/.
-8. Para pasar la botonera del PC a la central: cambiar SOLO el valor de BASE_PC
-   en main.cpp de la botonera por http://IP_CENTRAL:8080 y volver a cargarla.
-   El nombre BASE_PC se mantiene para no cambiar mas codigo.
-   La IP se obtiene por DHCP; conviene reservarla en el router posteriormente.
+DFPlayer: VCC a 5 V verificados y GND comun. TX del DFPlayer a GPIO16;
+RX del DFPlayer desde GPIO17 con resistencia serie de 1 kohm. BUSY a GPIO4.
+Altavoz entre SPK1 y SPK2. No conectar una salida SPK a GND.
+El fallo observado fue de alimentacion: desde el terminal VIN elegido no
+llegaban los 5 V necesarios. Al corregirlo y reconectar BUSY, funciono.
+No se ha demostrado que la inicializacion compatible fuera necesaria.
 
-La web devuelve JSON; actualizar la pagina para ver cambios.
-No se han conectado ni validado DFPlayer, microSD o salida de audio en esta etapa.
-Historial en RAM: 64 eventos y 32 sesiones. Se pierde al reiniciar.
-Al reiniciar central durante un aviso, no lo reanuda automaticamente.
-Este receptor de pruebas no implementa autenticacion; no publicar el puerto en Internet.
+microSD: /MP3/0009_inicio.mp3, /MP3/0001...mp3 a 0008...mp3 para avisos,
+y /MP3/0020...mp3 para el tono final. Respaldar la tarjeta antes de cambios.
+Secuencia: tono inicial una vez, voz N veces, tono final una vez.
+TODOS repite la secuencia completa para cada aviso del 1 al 8.
 
-VALIDACION
-Preparado contra el protocolo del receptor_pc.py 0.3.0.
-La compilacion y la prueba fisica en ESP32 se realizan en tu PlatformIO.
+Arranque compatible: espera 3 s, sin ACK ni reinicio por UART.
+MODO COMPATIBLE permite enviar; no demuestra que el modulo responda.
+BUSY CONFIRMA indica inicio observado; FIN AUDIO completa la secuencia.
+Volumen en este codigo: 10/30, configurable en VOLUMEN. No subirlo a ciegas.
+
+25/10/2026: Hector confirma funcionamiento real tras corregir alimentacion,
+con BUSY conectado, incluidos los menus y Reproducir todos los mensajes.
+La prueba automatica de la secuencia complementa la comprobacion fisica.
+Pantalla de diagnostico en la central: propuesta futura, aun sin implementar.
+Detalles y pendientes en docs/central_v0.2.1.md.

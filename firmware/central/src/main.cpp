@@ -1,11 +1,12 @@
-// Central Megafonia 0.1.0. Audio SIMULADO: 2 segundos por repeticion.
+// Central Megafonia 0.2.1. Audio real por DFPlayer Mini y fin por BUSY.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include "secrets.h"
+#include <DFRobotDFPlayerMini.h>
+#include "SecuenciaAudio.h"
 
-constexpr uint32_t DURACION_MS = 2000;
 constexpr uint16_t PUERTO = 8080;
 const char* AVISOS[] = {"", "I. Urbano", "I. Industrial", "I. Vehiculo",
   "I. Contenedor", "Accidente Trafico", "Rescate", "Servicio Tecnico", "Escape de Gas"};
@@ -22,7 +23,6 @@ Evento eventos[64];
 Sesion sesiones[32];
 size_t siguienteEvento = 0, siguienteSesion = 0;
 int activo = -1;
-uint32_t inicioPaso = 0;
 bool conectadoAntes = false;
 uint32_t ultimoIntento = 0;
 
@@ -57,27 +57,102 @@ int buscarEvento(const String& id) {
   return -1;
 }
 
+constexpr uint8_t PIN_RX_DF = 16, PIN_TX_DF = 17, PIN_BUSY = 4;
+constexpr uint8_t VOLUMEN = 10;  // Rango 0..30, bajo para la prueba.
+constexpr bool USAR_TONOS = true;
+constexpr uint32_t PAUSA_MS = 250, INICIO_MAX_MS = 4000, PISTA_MAX_MS = 180000;
+DFRobotDFPlayerMini reproductor;
+SecuenciaAudio secuenciaAudio;
+enum FaseAudio { SILENCIO, ESPERAR_REPOSO, ESPERAR_INICIO, SONANDO };
+FaseAudio faseAudio = SILENCIO;
+bool dfListo = false, altoDetectado = false;
+bool respuestaDfRecibida = false, busyValidado = false;
+uint32_t marcaAudio = 0, desdeAlto = 0;
+uint16_t pistaActual = 0;
+
+void fallarAudio(const char* motivo) {
+  Serial.printf("ERROR AUDIO | %s\n", motivo);
+  if (activo >= 0) eventos[activo].estado = "FALLIDA";
+  activo = -1;
+  faseAudio = SILENCIO;
+  reproductor.stop();
+}
+
 void anunciar() {
   const Evento& e = eventos[activo];
-  Serial.printf("SIMULACION | %u %s | repeticion %u/%u\n", e.boton,
-                AVISOS[e.boton], e.repeticion, e.repeticiones);
+  Serial.printf("AUDIO | %u %s | repeticion %u/%u | pista %04u | %s\n",
+                e.boton, AVISOS[e.boton], e.repeticion, e.repeticiones, pistaActual,
+                secuenciaAudio.etapa() == SecuenciaAudio::VOZ ? "VOZ" : "TONO");
+}
+
+void iniciarAudio(const Evento& e) {
+  reproductor.stop();
+  secuenciaAudio.iniciar(e.boton, e.repeticiones, e.accion == "TODOS", USAR_TONOS);
+  faseAudio = ESPERAR_REPOSO;
+  marcaAudio = millis();
+  altoDetectado = false;
 }
 
 void actualizarReproduccion(uint32_t ahora) {
-  while (activo >= 0 && uint32_t(ahora - inicioPaso) >= DURACION_MS) {
-    Evento& e = eventos[activo];
-    inicioPaso += DURACION_MS;
-    if (e.repeticion < e.repeticiones) ++e.repeticion;
-    else if (e.accion == "TODOS" && e.boton < 8) {
-      ++e.boton;
-      e.repeticion = 1;
-    } else {
-      e.estado = "FINALIZADA";
-      Serial.printf("FIN SIMULACION | %s\n", e.id.c_str());
-      activo = -1;
-      return;
+  // El fin se determina por BUSY, nunca por un mensaje UART atrasado.
+  if (reproductor.available()) {
+    uint8_t tipo = reproductor.readType();
+    int valor = reproductor.read();
+    if (tipo == DFPlayerCardRemoved) {
+      dfListo = false;
+      if (activo >= 0) fallarAudio("MicroSD retirada; insertar y reiniciar central");
+    } else if (tipo == DFPlayerError) {
+      Serial.printf("DFPlayer informa error %d\n", valor);
+      if (activo >= 0 && faseAudio != ESPERAR_REPOSO) {
+        fallarAudio("Error del DFPlayer durante la reproduccion"); return;
+      }
     }
-    anunciar();
+  }
+  if (activo < 0 || faseAudio == SILENCIO) return;
+  bool ocupado = digitalRead(PIN_BUSY) == LOW;
+  if (faseAudio == ESPERAR_REPOSO) {
+    if (ocupado) altoDetectado = false;
+    else if (!altoDetectado) { altoDetectado = true; desdeAlto = ahora; }
+    if (altoDetectado && uint32_t(ahora - desdeAlto) >= PAUSA_MS) {
+      pistaActual = secuenciaAudio.pista();
+      reproductor.playMp3Folder(pistaActual);
+      marcaAudio = millis();
+      faseAudio = ESPERAR_INICIO;
+      altoDetectado = false;
+      anunciar();
+    } else if (uint32_t(ahora - marcaAudio) >= INICIO_MAX_MS) {
+      fallarAudio("BUSY no vuelve a reposo; comprobar GPIO 4 y cableado");
+    }
+  } else if (faseAudio == ESPERAR_INICIO) {
+    if (ocupado) {
+      busyValidado = true;
+      Serial.println("BUSY CONFIRMA: reproduccion iniciada");
+      faseAudio = SONANDO;
+      marcaAudio = ahora;
+      altoDetectado = false;
+    } else if (uint32_t(ahora - marcaAudio) >= INICIO_MAX_MS) {
+      fallarAudio("La pista no arranca; comprobar archivo MP3 y BUSY");
+    }
+  } else if (faseAudio == SONANDO) {
+    if (ocupado) altoDetectado = false;
+    else if (!altoDetectado) { altoDetectado = true; desdeAlto = ahora; }
+    if (altoDetectado && uint32_t(ahora - desdeAlto) >= 60) {
+      if (secuenciaAudio.terminarPista()) {
+        eventos[activo].boton = secuenciaAudio.boton();
+        eventos[activo].repeticion = secuenciaAudio.repeticion();
+        faseAudio = ESPERAR_REPOSO;
+        marcaAudio = ahora;
+        desdeAlto = ahora;
+        altoDetectado = true;
+      } else {
+        eventos[activo].estado = "FINALIZADA";
+        Serial.printf("FIN AUDIO | %s\n", eventos[activo].id.c_str());
+        activo = -1;
+        faseAudio = SILENCIO;
+      }
+    } else if (uint32_t(ahora - marcaAudio) >= PISTA_MAX_MS) {
+      fallarAudio("Pista supera 180 segundos o BUSY queda activo");
+    }
   }
 }
 
@@ -104,7 +179,7 @@ void responderEvento(const Evento& e, bool duplicado = false) {
   doc["repeticion"] = e.repeticion;
   doc["repeticiones"] = e.repeticiones;
   doc["duplicado"] = duplicado;
-  doc["simulado"] = true;
+  doc["simulado"] = false;
   servidor.sendHeader("X-Evento-ID", e.id);
   servidor.sendHeader("X-Reproduccion", e.estado);
   servidor.sendHeader("X-Boton", String(e.boton));
@@ -165,6 +240,9 @@ void recibirEvento() {
   if (accion == "PARAR" && activo >= 0 && eventos[activo].id != objetivo) {
     errorHttp(409, "La reproduccion activa es otra"); return;
   }
+  if (accion != "PARAR" && !dfListo) {
+    errorHttp(503, "DFPlayer no preparado; revisar SD y reiniciar central"); return;
+  }
   if (indiceSesion < 0) {
     indiceSesion = int(siguienteSesion);
     siguienteSesion = (siguienteSesion + 1) % 32;
@@ -173,8 +251,12 @@ void recibirEvento() {
   sesiones[indiceSesion].secuencia = numero;
   if (activo >= 0) {
     eventos[activo].estado = accion == "PARAR" ? "PARADA" : "SUSTITUIDA";
-    Serial.println(accion == "PARAR" ? "SIMULACION PARADA" : "AVISO SUSTITUIDO");
+    Serial.println(accion == "PARAR" ? "AUDIO PARADO" : "AVISO SUSTITUIDO");
     activo = -1;
+  }
+  if (accion == "PARAR") {
+    reproductor.stop();
+    faseAudio = SILENCIO;
   }
   int indice = int(siguienteEvento);
   siguienteEvento = (siguienteEvento + 1) % 64;
@@ -187,8 +269,7 @@ void recibirEvento() {
   e.estado = accion == "PARAR" ? "PARADA" : "ACTIVA";
   if (accion != "PARAR") {
     activo = indice;
-    inicioPaso = millis();
-    anunciar();
+    iniciarAudio(e);
   }
   responderEvento(e);
 }
@@ -196,10 +277,16 @@ void recibirEvento() {
 void resumen() {
   actualizarReproduccion(millis());
   StaticJsonDocument<1024> doc;
-  doc["estado"] = "Central preparada";
-  doc["version"] = "0.1.0";
-  doc["simulado"] = true;
-  doc["segundos_por_reproduccion"] = 2;
+  doc["estado"] = !dfListo ? "Revisar DFPlayer y microSD" :
+    busyValidado ? "Audio iniciado y confirmado por BUSY" : "Pendiente de verificar audio con BUSY";
+  doc["version"] = "0.2.1";
+  doc["simulado"] = false;
+  doc["dfplayer_envio_habilitado"] = dfListo;
+  doc["respuesta_uart_recibida"] = respuestaDfRecibida;
+  doc["reproduccion_busy_validada"] = busyValidado;
+  doc["busy_activo"] = digitalRead(PIN_BUSY) == LOW;
+  doc["tonos"] = USAR_TONOS;
+  doc["volumen"] = VOLUMEN;
   doc["ip"] = WiFi.localIP().toString();
   doc["rssi"] = WiFi.RSSI();
   if (activo < 0) doc["reproduciendo"] = nullptr;
@@ -216,10 +303,33 @@ void resumen() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\nCENTRAL MEGAFONIA 0.1.0 - AUDIO SIMULADO");
+  Serial.println("\nCENTRAL MEGAFONIA 0.2.1 - AUDIO REAL");
   Serial.printf("Flash: %u MB | PSRAM: %u MB\n",
                 unsigned(ESP.getFlashChipSize() / 1048576),
                 unsigned(ESP.getPsramSize() / 1048576));
+  pinMode(PIN_BUSY, INPUT_PULLUP);
+  Serial1.begin(9600, SERIAL_8N1, PIN_RX_DF, PIN_TX_DF);
+  Serial.println("Esperando 3 segundos al arranque del DFPlayer...");
+  delay(3000);
+  // begin sin ACK y sin reset siempre devuelve true: NO prueba el enlace.
+  // Habilitamos el envio y verificamos por una consulta y por BUSY al reproducir.
+  reproductor.begin(Serial1, false, false);
+  reproductor.setTimeOut(600);
+  reproductor.stop();
+  delay(150);
+  reproductor.volume(VOLUMEN);
+  delay(150);
+  reproductor.enableDAC();
+  delay(150);
+  int archivos = reproductor.readFileCounts();
+  respuestaDfRecibida = archivos > 0;
+  if (respuestaDfRecibida) {
+    Serial.printf("DFPLAYER RESPONDE | archivos reportados: %d\n", archivos);
+  } else {
+    Serial.println("Sin respuesta valida a la consulta. Aun no confirma un fallo de audio.");
+  }
+  dfListo = true;  // Envios permitidos; no significa reproduccion confirmada.
+  Serial.println("MODO COMPATIBLE | volumen 10/30 | pulsar un aviso para verificar BUSY");
   servidor.on("/", HTTP_GET, resumen);
   servidor.on("/evento", HTTP_POST, recibirEvento);
   servidor.on("/estado", HTTP_GET, []() {
@@ -247,7 +357,7 @@ void loop() {
   if (conectado && !conectadoAntes) {
     servidor.begin();
     Serial.printf("WIFI OK | http://%s:%u/\n", WiFi.localIP().toString().c_str(), PUERTO);
-    Serial.println("Central lista. Duracion simulada: 2 segundos por repeticion.");
+    Serial.println("Central en red. Audio real: pulsar un aviso en la botonera.");
   } else if (!conectado && conectadoAntes) {
     servidor.stop();
     Serial.println("WiFi perdido. Reconectando...");
