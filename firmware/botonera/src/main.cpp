@@ -19,7 +19,7 @@ constexpr uint8_t PINES[] = {27, 26, 25, 33, 32, 18, 19, 23};
 constexpr uint32_t ANTIRREBOTE_MS = 30;
 constexpr uint32_t PULSACION_LARGA_MS = 5000;
 constexpr uint32_t ERROR_MS = 4000;
-constexpr char VERSION_FW[] = "0.4.1";
+constexpr char VERSION_FW[] = "0.4.2";
 constexpr uint8_t MIN_REP = 2, MAX_REP = 10;
 const char* AVISOS[] = {
   "I. Urbano", "I. Industrial", "I. Vehiculo", "I. Contenedor",
@@ -113,7 +113,7 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C pantalla(
 Vista vista = ESPERA;
 Modo modo = NORMAL;
 uint8_t seleccion = 0, repeticiones = 2, editandoRep = 2;
-uint8_t ultimoBoton = 0, repeticionActual = 1;
+uint8_t ultimoBoton = 0, repeticionActual = 1, repeticionesActivas = 2;
 uint32_t secuencia = 0, objetivoActivo = 0, inicioError = 0;
 uint32_t ultimaPantalla = 0, intentoWiFi = 0, ultimaTeclaBaja = 0;
 bool bloqueoSalida = false, huboAcuse = false;
@@ -306,6 +306,7 @@ void mandar(Accion accion, uint8_t boton, uint32_t ahora) {
     objetivoActivo = secuencia;
     ultimoBoton = accion == TODOS ? 1 : boton;
     repeticionActual = 1;
+    repeticionesActivas = repeticiones;
   }
   if (!emisorListo || WiFi.status() != WL_CONNECTED) {
     mostrarError(ahora);
@@ -483,7 +484,7 @@ void dibujar(uint32_t ahora) {
       textoCentrado(progreso, 12);
       textoCentrado(AVISOS[ultimoBoton - 1], 28);
       snprintf(progreso, sizeof(progreso), "Repeticion %u/%u",
-               static_cast<unsigned>(repeticionActual), static_cast<unsigned>(repeticiones));
+               static_cast<unsigned>(repeticionActual), static_cast<unsigned>(repeticionesActivas));
       textoCentrado(progreso, 44);
       pantalla.setFont(u8g2_font_5x7_tr);
       textoCentrado("2:cancelar", 54);
@@ -497,7 +498,13 @@ void dibujar(uint32_t ahora) {
     pantalla.setDrawColor(0);
     textoCentrado(AVISOS[ultimoBoton - 1], 29);
     pantalla.setDrawColor(1);
-    if (vista == ERROR_AVISO && ((ahora - inicioError) / 500) % 2 == 0)
+    if (vista == AVISO) {
+      char progreso[24];
+      snprintf(progreso, sizeof(progreso), "Mensaje %u/%u",
+               static_cast<unsigned>(repeticionActual),
+               static_cast<unsigned>(repeticionesActivas));
+      textoCentrado(progreso, 49);
+    } else if (vista == ERROR_AVISO && ((ahora - inicioError) / 500) % 2 == 0)
       textoCentrado("SIN CONFIRMACION", 49);
   }
   if (modo == VERSION || (modo == NORMAL && vista == ESPERA)) {
@@ -525,7 +532,7 @@ void setup() {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   WiFi.begin(MEGAFONIA_SSID, MEGAFONIA_PASSWORD);
-  Serial.printf("BOTONERA 0.4.1 | enlace directo | buscando %s\n", MEGAFONIA_SSID);
+  Serial.printf("BOTONERA 0.4.2 | enlace directo | buscando %s\n", MEGAFONIA_SSID);
   intentoWiFi = millis();
   dibujar(millis());
 }

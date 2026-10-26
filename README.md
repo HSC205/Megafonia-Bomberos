@@ -7,7 +7,7 @@ Sistema de avisos por megafonía con dos ESP32, OLED y DFPlayer Mini.
 La central ESP32-S3 crea su propia Wi-Fi de 2,4 GHz; la botonera ESP32-WROOM-32U se conecta directamente a ella. El router no interviene en el envio de avisos. El acceso Ethernet desde la red del parque queda para una etapa posterior.
 
 - Central 0.3.1: red MEGAFONIA-CENTRAL y direccion 192.168.4.1:8080.
-- Botonera 0.4.1: ocho avisos, menu, repeticiones, SIN CONFIRMACION y firma by HSC205.
+- Botonera 0.4.2: ocho avisos, menu, repeticiones, SIN CONFIRMACION y firma by HSC205.
 - Archivo privado en cada proyecto: include/enlace_privado.h. Copiar enlace.example.h y poner los mismos valores en ambas placas. No publicarlo.
 - No hay que cambiar el cableado del montaje probado ni los MP3.
 
@@ -18,3 +18,5 @@ La etapa anterior validada fisicamente por el usuario esta conservada en el comm
 ## Volumen y OLED
 
 Volumen 0–30 desde el menú, guardado en la central. Firma solo en espera y versión; selección y aviso invertidos en la OLED monocroma. [Instalación y pruebas](docs/volumen_menu.md).
+
+Botonera 0.4.2: los avisos individuales muestran Mensaje 1/2, Mensaje 2/2, etc., debajo del nombre y en texto normal. El total queda fijado al enviar el aviso; el avance se recibe de la central. Durante los tonos se mantiene el numero de repeticion de la secuencia.
