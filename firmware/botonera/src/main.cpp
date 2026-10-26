@@ -19,7 +19,7 @@ constexpr uint8_t PINES[] = {27, 26, 25, 33, 32, 18, 19, 23};
 constexpr uint32_t ANTIRREBOTE_MS = 30;
 constexpr uint32_t PULSACION_LARGA_MS = 5000;
 constexpr uint32_t ERROR_MS = 4000;
-constexpr char VERSION_FW[] = "0.4.0";
+constexpr char VERSION_FW[] = "0.4.1";
 constexpr uint8_t MIN_REP = 2, MAX_REP = 10;
 const char* AVISOS[] = {
   "I. Urbano", "I. Industrial", "I. Vehiculo", "I. Contenedor",
@@ -92,10 +92,18 @@ struct Resultado {
   uint8_t boton, repeticion;
 };
 enum Vista { ESPERA, AVISO, ERROR_AVISO };
-enum Modo { NORMAL, MENU, EDITAR_REP, ESTADO, VERSION, PRUEBA, CANCELANDO };
+enum Modo { NORMAL, MENU, EDITAR_REP, EDITAR_VOL, ESTADO, VERSION, PRUEBA, CANCELANDO };
 const char* OPCIONES[] = {
-  "Reproducir todos", "Repeticiones", "Estado del sistema", "Version", "Salir"
+  "Reproducir todos", "Repeticiones", "Volumen", "Estado del sistema", "Version", "Salir"
 };
+constexpr uint8_t NUM_OPCIONES = sizeof(OPCIONES) / sizeof(OPCIONES[0]);
+struct PeticionVolumen { uint32_t id, creada; bool guardar; uint8_t valor; };
+struct RespuestaVolumen { uint32_t id; bool ok, guardar; uint8_t valor; };
+QueueHandle_t peticionesVol = nullptr, respuestasVol = nullptr;
+uint32_t idVolumen = 0;
+uint8_t editandoVol = 0;
+bool volumenCargado = false, volumenPendiente = false;
+const char* notaVolumen = nullptr;
 QueueHandle_t envios = nullptr, resultados = nullptr;
 bool emisorListo = false;
 char sesion[32] = {};
@@ -160,6 +168,59 @@ Resultado consultarCentral(const Solicitud& s, bool nuevo) {
   return r;
 }
 
+RespuestaVolumen consultarVolumen(const PeticionVolumen& p) {
+  RespuestaVolumen r{p.id, false, p.guardar, 0};
+  if (WiFi.status() != WL_CONNECTED || millis() - p.creada > 2500) return r;
+  WiFiClient cliente;
+  HTTPClient http;
+  http.setConnectTimeout(800); http.setTimeout(1000);
+  if (!http.begin(cliente, String(BASE_CENTRAL) + "/volumen")) return r;
+  const char* campos[] = {"X-Volumen"};
+  http.collectHeaders(campos, 1);
+  int codigo;
+  if (p.guardar) {
+    http.addHeader("Content-Type", "application/json");
+    codigo = http.POST(String("{\"volumen\":") + String(p.valor) + "}");
+  } else codigo = http.GET();
+  String valor = http.header("X-Volumen");
+  bool numero = valor.length() > 0 && valor.length() <= 2;
+  for (unsigned i = 0; i < valor.length(); ++i)
+    if (valor[i] < '0' || valor[i] > '9') numero = false;
+  int v = valor.toInt();
+  if (codigo == 200 && numero && v <= 30 && (!p.guardar || v == p.valor)) {
+    r.ok = true; r.valor = uint8_t(v);
+  }
+  http.end(); return r;
+}
+
+void pedirVolumen(bool guardar, uint32_t ahora) {
+  notaVolumen = nullptr;
+  if (!peticionesVol || WiFi.status() != WL_CONNECTED) {
+    notaVolumen = "SIN CONFIRMACION"; return;
+  }
+  PeticionVolumen p{++idVolumen, ahora, guardar, editandoVol};
+  volumenPendiente = true;
+  xQueueOverwrite(peticionesVol, &p);
+}
+
+void actualizarVolumen() {
+  if (!respuestasVol) return;
+  RespuestaVolumen r;
+  while (xQueueReceive(respuestasVol, &r, 0) == pdTRUE) {
+    if (r.id != idVolumen || modo != EDITAR_VOL) continue;
+    volumenPendiente = false;
+    if (!r.ok) {
+      // Un timeout al guardar puede haber ocurrido despues de aplicarse.
+      // Obliga a consultar otra vez antes de ofrecer un valor como confirmado.
+      volumenCargado = false;
+      notaVolumen = "SIN CONFIRMACION";
+    } else {
+      editandoVol = r.valor; volumenCargado = true;
+      notaVolumen = r.guardar ? "GUARDADO" : nullptr;
+    }
+  }
+}
+
 void trabajadorRed(void*) {
   Solicitud actual{};
   bool siguiendo = false;
@@ -181,6 +242,11 @@ void trabajadorRed(void*) {
       siguiendo = r.estado == ACTIVA;
       xQueueSend(resultados, &r, portMAX_DELAY);
     }
+    PeticionVolumen pv;
+    if (xQueueReceive(peticionesVol, &pv, 0) == pdTRUE) {
+      RespuestaVolumen rv = consultarVolumen(pv);
+      xQueueOverwrite(respuestasVol, &rv);
+    }
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
@@ -188,13 +254,18 @@ void trabajadorRed(void*) {
 void iniciarRed() {
   envios = xQueueCreate(1, sizeof(Solicitud));
   resultados = xQueueCreate(8, sizeof(Resultado));
-  if (envios && resultados &&
+  peticionesVol = xQueueCreate(1, sizeof(PeticionVolumen));
+  respuestasVol = xQueueCreate(1, sizeof(RespuestaVolumen));
+  if (envios && resultados && peticionesVol && respuestasVol &&
       xTaskCreate(trabajadorRed, "RedAvisos", 6144, nullptr, 1, nullptr) == pdPASS) {
     emisorListo = true;
     return;
   }
   if (envios) vQueueDelete(envios);
   if (resultados) vQueueDelete(resultados);
+  if (peticionesVol) vQueueDelete(peticionesVol);
+  if (respuestasVol) vQueueDelete(respuestasVol);
+  peticionesVol = respuestasVol = nullptr;
   envios = resultados = nullptr;
 }
 
@@ -282,14 +353,17 @@ void manejarTeclas(const Evento* e, uint32_t ahora) {
   // En cualquier pantalla del menu no se envian los avisos normales.
   if (modo == MENU) {
     if (e[1] == CORTA) { modo = NORMAL; bloquearSalida(ahora); }
-    else if (e[6] == CORTA) seleccion = (seleccion + 4) % 5;
-    else if (e[7] == CORTA) seleccion = (seleccion + 1) % 5;
+    else if (e[6] == CORTA) seleccion = (seleccion + NUM_OPCIONES - 1) % NUM_OPCIONES;
+    else if (e[7] == CORTA) seleccion = (seleccion + 1) % NUM_OPCIONES;
     else if (e[0] == CORTA) {
       if (seleccion == 0) { modo = PRUEBA; mandar(TODOS, 1, ahora); }
       else if (seleccion == 1) {
         modo = EDITAR_REP; editandoRep = repeticiones; notaEditor = nullptr;
-      } else if (seleccion == 2) modo = ESTADO;
-      else if (seleccion == 3) modo = VERSION;
+      } else if (seleccion == 2) {
+        modo = EDITAR_VOL; volumenCargado = false; volumenPendiente = false;
+        pedirVolumen(false, ahora);
+      } else if (seleccion == 3) modo = ESTADO;
+      else if (seleccion == 4) modo = VERSION;
       else { modo = NORMAL; bloquearSalida(ahora); }
     }
   } else if (modo == EDITAR_REP) {
@@ -299,6 +373,16 @@ void manejarTeclas(const Evento* e, uint32_t ahora) {
     else if (e[0] == CORTA) {
       if (guardarRepeticiones(editandoRep)) modo = MENU;
       else { notaEditor = "ERROR AL GUARDAR"; inicioNota = ahora; }
+    }
+  } else if (modo == EDITAR_VOL) {
+    // Mientras se guarda no se permite salir: evita ocultar una confirmacion pendiente.
+    if (volumenPendiente) return;
+    if (e[1] == CORTA) { modo = MENU; ++idVolumen; }
+    else if (e[0] == CORTA) pedirVolumen(volumenCargado, ahora);
+    else if (volumenCargado && e[6] == CORTA && editandoVol > 0) {
+      --editandoVol; notaVolumen = nullptr;
+    } else if (volumenCargado && e[7] == CORTA && editandoVol < 30) {
+      ++editandoVol; notaVolumen = nullptr;
     }
   } else if (modo == ESTADO || modo == VERSION) {
     if (e[1] == CORTA) modo = MENU;
@@ -337,10 +421,15 @@ void dibujar(uint32_t ahora) {
   if (modo == MENU) {
     textoCentrado("MENU DE SERVICIO", 10);
     uint8_t primero = seleccion < 2 ? 0 : seleccion - 2;
-    for (uint8_t fila = 0; fila < 3 && primero + fila < 5; ++fila) {
+    for (uint8_t fila = 0; fila < 3 && primero + fila < NUM_OPCIONES; ++fila) {
       uint8_t indice = primero + fila;
+      if (indice == seleccion) {
+        pantalla.drawBox(0, 12 + fila * 11, 128, 11);
+        pantalla.setDrawColor(0);
+      }
       pantalla.drawStr(0, 22 + fila * 11, indice == seleccion ? ">" : " ");
       pantalla.drawStr(10, 22 + fila * 11, OPCIONES[indice]);
+      pantalla.setDrawColor(1);
     }
     pantalla.setFont(u8g2_font_5x7_tr);
     pantalla.drawStr(0, 54, "7/8  1:OK  2:volver");
@@ -352,6 +441,19 @@ void dibujar(uint32_t ahora) {
     else textoCentrado("Min 2  Max 10", 46);
     pantalla.setFont(u8g2_font_5x7_tr);
     pantalla.drawStr(0, 54, "7:- 8:+ 1:OK 2:atras");
+  } else if (modo == EDITAR_VOL) {
+    textoCentrado("VOLUMEN CENTRAL", 12);
+    char valor[16];
+    if (volumenCargado) snprintf(valor, sizeof(valor), "%u / 30", unsigned(editandoVol));
+    else snprintf(valor, sizeof(valor), "-- / 30");
+    textoCentrado(valor, 29);
+    pantalla.drawFrame(14, 34, 100, 7);
+    if (volumenCargado && editandoVol) pantalla.drawBox(15, 35, editandoVol * 98 / 30, 5);
+    if (volumenPendiente) textoCentrado("ESPERE...", 52);
+    else if (notaVolumen) textoCentrado(notaVolumen, 52);
+    else textoCentrado(editandoVol == 0 ? "SILENCIO" : "1:guardar  2:atras", 52);
+    pantalla.setFont(u8g2_font_5x7_tr);
+    textoCentrado(volumenCargado ? "7:- 8:+ 1:OK 2:atras" : "1:consultar 2:atras", 63);
   } else if (modo == ESTADO) {
     textoCentrado("ESTADO DEL SISTEMA", 10);
     pantalla.setCursor(0, 22);
@@ -391,12 +493,17 @@ void dibujar(uint32_t ahora) {
     pantalla.drawStr(20, 47, conectado ? "WiFi OK" : "Sin WiFi");
     iconoWiFi(88, 47, ahora);
   } else {
+    pantalla.drawBox(0, 17, 128, 16);
+    pantalla.setDrawColor(0);
     textoCentrado(AVISOS[ultimoBoton - 1], 29);
+    pantalla.setDrawColor(1);
     if (vista == ERROR_AVISO && ((ahora - inicioError) / 500) % 2 == 0)
       textoCentrado("SIN CONFIRMACION", 49);
   }
-  pantalla.setFont(u8g2_font_5x7_tr);
-  textoCentrado("by HSC205", 63);
+  if (modo == VERSION || (modo == NORMAL && vista == ESPERA)) {
+    pantalla.setFont(u8g2_font_5x7_tr);
+    textoCentrado("by HSC205", 63);
+  }
   pantalla.sendBuffer();
 }
 
@@ -418,7 +525,7 @@ void setup() {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   WiFi.begin(MEGAFONIA_SSID, MEGAFONIA_PASSWORD);
-  Serial.printf("BOTONERA 0.4.0 | enlace directo | buscando %s\n", MEGAFONIA_SSID);
+  Serial.printf("BOTONERA 0.4.1 | enlace directo | buscando %s\n", MEGAFONIA_SSID);
   intentoWiFi = millis();
   dibujar(millis());
 }
@@ -426,6 +533,7 @@ void setup() {
 void loop() {
   uint32_t ahora = millis();
   actualizarResultados(ahora);
+  actualizarVolumen();
   if (vista == ERROR_AVISO && ahora - inicioError >= ERROR_MS) {
     vista = ESPERA;
     if (modo == PRUEBA || modo == CANCELANDO) {

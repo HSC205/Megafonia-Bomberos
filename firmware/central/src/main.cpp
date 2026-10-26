@@ -1,6 +1,7 @@
-// Central Megafonia 0.3.0. Enlace directo sin router. Audio real por DFPlayer Mini y fin por BUSY.
+// Central Megafonia 0.3.1. Enlace directo sin router. Audio real por DFPlayer Mini y fin por BUSY.
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include "enlace_privado.h"
@@ -66,7 +67,8 @@ int buscarEvento(const String& id) {
 }
 
 constexpr uint8_t PIN_RX_DF = 16, PIN_TX_DF = 17, PIN_BUSY = 4;
-constexpr uint8_t VOLUMEN = 10;  // Rango 0..30, bajo para la prueba.
+constexpr uint8_t VOLUMEN_INICIAL = 10;  // Solo si aun no hay ajuste guardado.
+uint8_t volumen = VOLUMEN_INICIAL;
 constexpr bool USAR_TONOS = true;
 constexpr uint32_t PAUSA_MS = 250, INICIO_MAX_MS = 4000, PISTA_MAX_MS = 180000;
 DFRobotDFPlayerMini reproductor;
@@ -175,6 +177,45 @@ void errorHttp(int codigo, const char* mensaje) {
   StaticJsonDocument<192> doc;
   doc["error"] = mensaje;
   enviarJson(codigo, doc);
+}
+
+// La central es la unica autoridad del volumen: guarda NVS solo al confirmar.
+void cargarVolumen() {
+  Preferences p;
+  if (p.begin("megafonia", true)) {
+    uint8_t v = p.getUChar("volumen", VOLUMEN_INICIAL);
+    volumen = v <= 30 ? v : VOLUMEN_INICIAL;
+    p.end();
+  }
+}
+
+void responderVolumen() {
+  StaticJsonDocument<96> doc;
+  doc["volumen"] = volumen;
+  servidor.sendHeader("X-Volumen", String(volumen));
+  enviarJson(200, doc);
+}
+
+void cambiarVolumen() {
+  String cuerpo = servidor.arg("plain");
+  StaticJsonDocument<128> doc;
+  if (cuerpo.length() > 64 || deserializeJson(doc, cuerpo) ||
+      !doc.is<JsonObject>() || !doc["volumen"].is<int>()) {
+    errorHttp(400, "Volumen entero 0-30 requerido"); return;
+  }
+  int nuevo = doc["volumen"].as<int>();
+  if (nuevo < 0 || nuevo > 30) { errorHttp(400, "Volumen fuera de rango"); return; }
+  if (nuevo != volumen) {
+    Preferences p;
+    if (!p.begin("megafonia", false)) { errorHttp(500, "No se pudo guardar"); return; }
+    bool ok = p.putUChar("volumen", uint8_t(nuevo)) == 1;
+    p.end();
+    if (!ok) { errorHttp(500, "No se pudo guardar"); return; }
+    volumen = uint8_t(nuevo);
+  }
+  reproductor.volume(volumen);
+  Serial.printf("VOLUMEN | %u/30 | guardado en central\n", volumen);
+  responderVolumen();  // Confirma ajuste enviado; no mide el volumen acustico.
 }
 
 void responderEvento(const Evento& e, bool duplicado = false) {
@@ -287,14 +328,14 @@ void resumen() {
   StaticJsonDocument<1024> doc;
   doc["estado"] = !dfListo ? "Revisar DFPlayer y microSD" :
     busyValidado ? "Audio iniciado y confirmado por BUSY" : "Pendiente de verificar audio con BUSY";
-  doc["version"] = "0.3.0";
+  doc["version"] = "0.3.1";
   doc["simulado"] = false;
   doc["dfplayer_envio_habilitado"] = dfListo;
   doc["respuesta_uart_recibida"] = respuestaDfRecibida;
   doc["reproduccion_busy_validada"] = busyValidado;
   doc["busy_activo"] = digitalRead(PIN_BUSY) == LOW;
   doc["tonos"] = USAR_TONOS;
-  doc["volumen"] = VOLUMEN;
+  doc["volumen"] = volumen;
   doc["ip"] = WiFi.softAPIP().toString();
   doc["modo_red"] = "AP_DIRECTO";
   doc["ssid"] = MEGAFONIA_SSID;
@@ -334,7 +375,7 @@ bool iniciarEnlaceDirecto() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\nCENTRAL MEGAFONIA 0.3.0 - WIFI PROPIA Y AUDIO REAL");
+  Serial.println("\nCENTRAL MEGAFONIA 0.3.1 - WIFI PROPIA Y AUDIO REAL");
   Serial.printf("Flash: %u MB | PSRAM: %u MB\n",
                 unsigned(ESP.getFlashChipSize() / 1048576),
                 unsigned(ESP.getPsramSize() / 1048576));
@@ -348,7 +389,8 @@ void setup() {
   reproductor.setTimeOut(600);
   reproductor.stop();
   delay(150);
-  reproductor.volume(VOLUMEN);
+  cargarVolumen();
+  reproductor.volume(volumen);
   delay(150);
   reproductor.enableDAC();
   delay(150);
@@ -360,8 +402,10 @@ void setup() {
     Serial.println("Sin respuesta valida a la consulta. Aun no confirma un fallo de audio.");
   }
   dfListo = true;  // Envios permitidos; no significa reproduccion confirmada.
-  Serial.println("MODO COMPATIBLE | volumen 10/30 | pulsar un aviso para verificar BUSY");
+  Serial.printf("MODO COMPATIBLE | volumen %u/30 | pulsar un aviso para verificar BUSY\n", volumen);
   servidor.on("/", HTTP_GET, resumen);
+  servidor.on("/volumen", HTTP_GET, responderVolumen);
+  servidor.on("/volumen", HTTP_POST, cambiarVolumen);
   servidor.on("/evento", HTTP_POST, recibirEvento);
   servidor.on("/estado", HTTP_GET, []() {
     actualizarReproduccion(millis());
