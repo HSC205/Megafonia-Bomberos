@@ -2,3 +2,6 @@
 .vscode/
 include/secrets.h
 src/secrets.h
+include/enlace_privado.h
+src/enlace_privado.h
+

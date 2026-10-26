@@ -1,9 +1,12 @@
-// Central Megafonia 0.2.1. Audio real por DFPlayer Mini y fin por BUSY.
+// Central Megafonia 0.3.0. Enlace directo sin router. Audio real por DFPlayer Mini y fin por BUSY.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
-#include "secrets.h"
+#include "enlace_privado.h"
+
+static_assert(sizeof(MEGAFONIA_SSID) > 1 && sizeof(MEGAFONIA_SSID) <= 33, "SSID: entre 1 y 32 caracteres");
+static_assert(sizeof(MEGAFONIA_PASSWORD) >= 9 && sizeof(MEGAFONIA_PASSWORD) <= 64, "Clave WiFi: entre 8 y 63 caracteres");
 #include <DFRobotDFPlayerMini.h>
 #include "SecuenciaAudio.h"
 
@@ -23,8 +26,13 @@ Evento eventos[64];
 Sesion sesiones[32];
 size_t siguienteEvento = 0, siguienteSesion = 0;
 int activo = -1;
-bool conectadoAntes = false;
-uint32_t ultimoIntento = 0;
+// AP exclusivo para la botonera; LAN se incorporara en otra etapa.
+const IPAddress IP_CENTRAL(192, 168, 4, 1);
+const IPAddress MASCARA_RED(255, 255, 255, 0);
+constexpr uint8_t CANAL_ENLACE = 6;
+bool enlaceListo = false;
+uint32_t ultimoIntentoEnlace = 0;
+int clientesAnteriores = -1;
 
 bool idValido(const String& id) {
   if (id.length() < 1 || id.length() > 64) return false;
@@ -279,7 +287,7 @@ void resumen() {
   StaticJsonDocument<1024> doc;
   doc["estado"] = !dfListo ? "Revisar DFPlayer y microSD" :
     busyValidado ? "Audio iniciado y confirmado por BUSY" : "Pendiente de verificar audio con BUSY";
-  doc["version"] = "0.2.1";
+  doc["version"] = "0.3.0";
   doc["simulado"] = false;
   doc["dfplayer_envio_habilitado"] = dfListo;
   doc["respuesta_uart_recibida"] = respuestaDfRecibida;
@@ -287,8 +295,12 @@ void resumen() {
   doc["busy_activo"] = digitalRead(PIN_BUSY) == LOW;
   doc["tonos"] = USAR_TONOS;
   doc["volumen"] = VOLUMEN;
-  doc["ip"] = WiFi.localIP().toString();
-  doc["rssi"] = WiFi.RSSI();
+  doc["ip"] = WiFi.softAPIP().toString();
+  doc["modo_red"] = "AP_DIRECTO";
+  doc["ssid"] = MEGAFONIA_SSID;
+  doc["clientes_wifi"] = WiFi.softAPgetStationNum();
+  doc["rssi"] = nullptr;  // En modo AP no hay RSSI de un router.
+  doc["ethernet_implementado"] = false;
   if (activo < 0) doc["reproduciendo"] = nullptr;
   else {
     const Evento& e = eventos[activo];
@@ -300,10 +312,29 @@ void resumen() {
   enviarJson(200, doc);
 }
 
+bool iniciarEnlaceDirecto() {
+  ultimoIntentoEnlace = millis();
+  servidor.stop();
+  bool ok = WiFi.mode(WIFI_AP);
+  if (ok) ok = WiFi.softAPConfig(IP_CENTRAL, IP_CENTRAL, MASCARA_RED);
+  if (ok) ok = WiFi.softAP(MEGAFONIA_SSID, MEGAFONIA_PASSWORD, CANAL_ENLACE, 0, 2);
+  if (!ok) {
+    WiFi.softAPdisconnect(true);
+    Serial.println("ERROR RED | no se pudo crear la WiFi propia; reintento en 15 s");
+    return false;
+  }
+  servidor.begin();
+  clientesAnteriores = -1;
+  Serial.printf("RED PROPIA OK | SSID %s | canal %u\n", MEGAFONIA_SSID, CANAL_ENLACE);
+  Serial.printf("CENTRAL | http://%s:%u/ | no necesita router ni Internet\n",
+                WiFi.softAPIP().toString().c_str(), PUERTO);
+  return true;
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\nCENTRAL MEGAFONIA 0.2.1 - AUDIO REAL");
+  Serial.println("\nCENTRAL MEGAFONIA 0.3.0 - WIFI PROPIA Y AUDIO REAL");
   Serial.printf("Flash: %u MB | PSRAM: %u MB\n",
                 unsigned(ESP.getFlashChipSize() / 1048576),
                 unsigned(ESP.getPsramSize() / 1048576));
@@ -342,32 +373,29 @@ void setup() {
   });
   servidor.onNotFound([]() { errorHttp(404, "Ruta desconocida"); });
   WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname("megafonia-central");
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  ultimoIntento = millis();
-  Serial.println("Conectando al WiFi...");
+  enlaceListo = iniciarEnlaceDirecto();
 }
 
 void loop() {
   uint32_t ahora = millis();
   actualizarReproduccion(ahora);
-  bool conectado = WiFi.status() == WL_CONNECTED;
-  if (conectado && !conectadoAntes) {
-    servidor.begin();
-    Serial.printf("WIFI OK | http://%s:%u/\n", WiFi.localIP().toString().c_str(), PUERTO);
-    Serial.println("Central en red. Audio real: pulsar un aviso en la botonera.");
-  } else if (!conectado && conectadoAntes) {
+  if (enlaceListo && !(WiFi.getMode() & WIFI_AP)) {
     servidor.stop();
-    Serial.println("WiFi perdido. Reconectando...");
+    enlaceListo = false;
+    Serial.println("ERROR RED | punto de acceso detenido; recreando enlace");
   }
-  conectadoAntes = conectado;
-  if (conectado) servidor.handleClient();
-  else if (uint32_t(ahora - ultimoIntento) >= 15000) {
-    ultimoIntento = ahora;
-    WiFi.reconnect();
-    Serial.println("Esperando conexion WiFi...");
+  if (!enlaceListo) {
+    if (uint32_t(ahora - ultimoIntentoEnlace) >= 15000)
+      enlaceListo = iniciarEnlaceDirecto();
+  } else {
+    // Se atiende aunque no haya clientes: WL_CONNECTED solo sirve para modo STA.
+    servidor.handleClient();
+    int clientes = WiFi.softAPgetStationNum();
+    if (clientes != clientesAnteriores) {
+      Serial.printf("ENLACE DIRECTO | clientes WiFi conectados: %d\n", clientes);
+      clientesAnteriores = clientes;
+    }
   }
   delay(1);
 }
+

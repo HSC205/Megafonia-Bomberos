@@ -8,14 +8,18 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
-#include "secrets.h"
+#include "enlace_privado.h"
 
-constexpr char BASE_PC[] = "http://192.168.68.114:8080";
+static_assert(sizeof(MEGAFONIA_SSID) > 1 && sizeof(MEGAFONIA_SSID) <= 33, "SSID: entre 1 y 32 caracteres");
+static_assert(sizeof(MEGAFONIA_PASSWORD) >= 9 && sizeof(MEGAFONIA_PASSWORD) <= 64, "Clave WiFi: entre 8 y 63 caracteres");
+
+// Red propia de la central: esta direccion no depende del router.
+constexpr char BASE_CENTRAL[] = "http://192.168.4.1:8080";
 constexpr uint8_t PINES[] = {27, 26, 25, 33, 32, 18, 19, 23};
 constexpr uint32_t ANTIRREBOTE_MS = 30;
 constexpr uint32_t PULSACION_LARGA_MS = 5000;
 constexpr uint32_t ERROR_MS = 4000;
-constexpr char VERSION_FW[] = "0.3.0";
+constexpr char VERSION_FW[] = "0.4.0";
 constexpr uint8_t MIN_REP = 2, MAX_REP = 10;
 const char* AVISOS[] = {
   "I. Urbano", "I. Industrial", "I. Vehiculo", "I. Contenedor",
@@ -105,6 +109,7 @@ uint8_t ultimoBoton = 0, repeticionActual = 1;
 uint32_t secuencia = 0, objetivoActivo = 0, inicioError = 0;
 uint32_t ultimaPantalla = 0, intentoWiFi = 0, ultimaTeclaBaja = 0;
 bool bloqueoSalida = false, huboAcuse = false;
+bool enlaceConectadoAntes = false;
 const char* notaEditor = nullptr;
 uint32_t inicioNota = 0;
 
@@ -112,14 +117,14 @@ void idEvento(char* destino, size_t n, uint32_t numero) {
   snprintf(destino, n, "%s-%lu", sesion, static_cast<unsigned long>(numero));
 }
 
-Resultado consultarPC(const Solicitud& s, bool nuevo) {
+Resultado consultarCentral(const Solicitud& s, bool nuevo) {
   Resultado r{s.secuencia, FALLIDA, -100, s.boton, 1};
   if (WiFi.status() != WL_CONNECTED) return r;
   if (nuevo && millis() - s.creada > 2500) { r.codigo = -101; return r; }
   char id[56], objetivo[56];
   idEvento(id, sizeof(id), s.secuencia);
   idEvento(objetivo, sizeof(objetivo), s.objetivo);
-  String url = String(BASE_PC) + (nuevo ? "/evento" : "/estado?id=");
+  String url = String(BASE_CENTRAL) + (nuevo ? "/evento" : "/estado?id=");
   if (!nuevo) url += id;
   WiFiClient cliente;
   HTTPClient http;
@@ -163,7 +168,7 @@ void trabajadorRed(void*) {
     Solicitud nueva;
     if (xQueueReceive(envios, &nueva, 0) == pdTRUE) {
       actual = nueva;
-      Resultado r = consultarPC(actual, true);
+      Resultado r = consultarCentral(actual, true);
       siguiendo = r.estado == ACTIVA;
       consulta = millis();
       xQueueSend(resultados, &r, portMAX_DELAY);
@@ -171,7 +176,7 @@ void trabajadorRed(void*) {
                     static_cast<unsigned long>(actual.secuencia), r.codigo,
                     static_cast<int>(r.estado));
     } else if (siguiendo && millis() - consulta >= 150) {
-      Resultado r = consultarPC(actual, false);
+      Resultado r = consultarCentral(actual, false);
       consulta = millis();
       siguiendo = r.estado == ACTIVA;
       xQueueSend(resultados, &r, portMAX_DELAY);
@@ -334,17 +339,19 @@ void dibujar(uint32_t ahora) {
     uint8_t primero = seleccion < 2 ? 0 : seleccion - 2;
     for (uint8_t fila = 0; fila < 3 && primero + fila < 5; ++fila) {
       uint8_t indice = primero + fila;
-      pantalla.drawStr(0, 24 + fila * 12, indice == seleccion ? ">" : " ");
-      pantalla.drawStr(10, 24 + fila * 12, OPCIONES[indice]);
+      pantalla.drawStr(0, 22 + fila * 11, indice == seleccion ? ">" : " ");
+      pantalla.drawStr(10, 22 + fila * 11, OPCIONES[indice]);
     }
-    pantalla.drawStr(0, 63, "7/8  1:OK  2:volver");
+    pantalla.setFont(u8g2_font_5x7_tr);
+    pantalla.drawStr(0, 54, "7/8  1:OK  2:volver");
   } else if (modo == EDITAR_REP) {
     textoCentrado("REPETICIONES", 12);
     char valor[12]; snprintf(valor, sizeof(valor), "%u", static_cast<unsigned>(editandoRep));
     textoCentrado(valor, 32);
     if (notaEditor && ahora - inicioNota < 2000) textoCentrado(notaEditor, 46);
     else textoCentrado("Min 2  Max 10", 46);
-    pantalla.drawStr(0, 62, "7:- 8:+ 1:OK 2:atras");
+    pantalla.setFont(u8g2_font_5x7_tr);
+    pantalla.drawStr(0, 54, "7:- 8:+ 1:OK 2:atras");
   } else if (modo == ESTADO) {
     textoCentrado("ESTADO DEL SISTEMA", 10);
     pantalla.setCursor(0, 22);
@@ -352,18 +359,20 @@ void dibujar(uint32_t ahora) {
     if (conectado) { pantalla.print(WiFi.RSSI()); pantalla.print(" dBm"); }
     pantalla.setCursor(0, 34); pantalla.print("IP:");
     if (conectado) pantalla.print(WiFi.localIP()); else pantalla.print("--");
-    pantalla.drawStr(0, 46, huboAcuse ? "Ult. acuse PC: OK" : "PC: sin comprobar");
-    pantalla.drawStr(0, 60, "2:volver");
+    pantalla.drawStr(0, 46, huboAcuse ? "Ult.acuse central: OK" : "Central sin comprobar");
+    pantalla.setFont(u8g2_font_5x7_tr);
+    pantalla.drawStr(0, 54, "2:volver");
   } else if (modo == VERSION) {
     textoCentrado("VERSION BOTONERA", 14);
     textoCentrado(VERSION_FW, 32);
-    textoCentrado("API PC 0.3.0", 46);
-    pantalla.drawStr(0, 60, "2:volver");
+    textoCentrado("Central via WiFi", 46);
+    pantalla.setFont(u8g2_font_5x7_tr);
+    pantalla.drawStr(0, 54, "2:volver");
   } else if (modo == PRUEBA || modo == CANCELANDO) {
     if (vista == ERROR_AVISO) {
       textoCentrado("PRUEBA DE AVISOS", 16);
       if (((ahora - inicioError) / 500) % 2 == 0)
-        textoCentrado("SIN CONFIRMAR", 40);
+        textoCentrado("SIN CONFIRMACION", 40);
     } else if (modo == CANCELANDO) {
       textoCentrado("DETENIENDO PRUEBA", 32);
     } else {
@@ -374,7 +383,8 @@ void dibujar(uint32_t ahora) {
       snprintf(progreso, sizeof(progreso), "Repeticion %u/%u",
                static_cast<unsigned>(repeticionActual), static_cast<unsigned>(repeticiones));
       textoCentrado(progreso, 44);
-      textoCentrado("2:cancelar", 60);
+      pantalla.setFont(u8g2_font_5x7_tr);
+      textoCentrado("2:cancelar", 54);
     }
   } else if (vista == ESPERA) {
     textoCentrado("MEGAFONIA", 27);
@@ -383,8 +393,10 @@ void dibujar(uint32_t ahora) {
   } else {
     textoCentrado(AVISOS[ultimoBoton - 1], 29);
     if (vista == ERROR_AVISO && ((ahora - inicioError) / 500) % 2 == 0)
-      textoCentrado("SIN CONFIRMAR", 49);
+      textoCentrado("SIN CONFIRMACION", 49);
   }
+  pantalla.setFont(u8g2_font_5x7_tr);
+  textoCentrado("by HSC205", 63);
   pantalla.sendBuffer();
 }
 
@@ -400,9 +412,13 @@ void setup() {
            static_cast<unsigned long>(mac & 0xffff),
            static_cast<unsigned long>(esp_random()));
   iniciarRed();
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  WiFi.setHostname("megafonia-botonera");
+  WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(MEGAFONIA_SSID, MEGAFONIA_PASSWORD);
+  Serial.printf("BOTONERA 0.4.0 | enlace directo | buscando %s\n", MEGAFONIA_SSID);
   intentoWiFi = millis();
   dibujar(millis());
 }
@@ -427,7 +443,18 @@ void loop() {
     if (todosSueltos && ahora - ultimaTeclaBaja >= ANTIRREBOTE_MS)
       bloqueoSalida = false;
   } else manejarTeclas(eventos, ahora);
-  if (WiFi.status() != WL_CONNECTED && ahora - intentoWiFi >= 15000) {
+  bool conectado = WiFi.status() == WL_CONNECTED;
+  if (conectado && !enlaceConectadoAntes) {
+    Serial.printf("CENTRAL WIFI OK | IP botonera %s | destino %s\n",
+                  WiFi.localIP().toString().c_str(), BASE_CENTRAL);
+  } else if (!conectado && enlaceConectadoAntes) {
+    huboAcuse = false;
+    // No dejar una pulsacion pendiente para enviarla al recuperar el enlace.
+    if (envios) xQueueReset(envios);
+    Serial.println("Enlace con central perdido. Reconectando a su red propia...");
+  }
+  enlaceConectadoAntes = conectado;
+  if (!conectado && ahora - intentoWiFi >= 15000) {
     intentoWiFi = ahora; WiFi.reconnect();
   }
   if (ahora - ultimaPantalla >= 100) {
@@ -435,4 +462,5 @@ void loop() {
   }
   delay(1);
 }
+
 
